@@ -26,15 +26,7 @@
 #include <epan/tfs.h>
 #include <wsutil/array.h>
 
-/* TODO: detect GSM_SAMPLE_RATE_MULT and verify
-- payload size
-- numPrbu
-*/
-
 // TODO: also check zeros against the expected, by symbol
-
-#define GSM_SAMPLE_RATE_MULT 2 // 15.38Msps/7.68Msps
-
 #define GSM_LONG_PL_SIZE 552
 #define GSM_PL_SIZE 548
 #define GSM_PL_SIZE_DELTA (GSM_LONG_PL_SIZE - GSM_PL_SIZE)
@@ -65,6 +57,8 @@ void proto_register_oran(void);
 
 /* Initialize the protocol and registered fields */
 static int proto_oran;
+
+static int gsm_sample_rate_mult; // 15.38Msps/7.68Msps
 
 static int hf_oran_du_port_id;
 static int hf_oran_bandsector_id;
@@ -373,6 +367,7 @@ static int hf_oran_meas_cmd_size;
 /* Computed fields */
 static int hf_oran_c_eAxC_ID;
 static int hf_oran_refa;
+static int hf_oran_refb;
 
 /* Hidden fields for filtering */
 static int hf_oran_cplane;
@@ -5141,13 +5136,14 @@ float computeTime(int frame, int subframe, int symbol)
 
 char *sampleRate(void)
 {
-    switch (GSM_SAMPLE_RATE_MULT)
+    switch (gsm_sample_rate_mult)
     {
     case 1:
-        return "at 7.68Msps";
+        return "7.68Msps";
     case 2:
-        return "at 15.38Msps";
+        return "15.38Msps";
     }
+    return "invalid";
 }
 
 /* User plane dissector (the only one needed) */
@@ -5211,45 +5207,112 @@ dissect_oran_u_gsm(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
     proto_tree_add_item_ret_uint(timing_header_tree, hf_oran_symbolId, tvb, offset, 1, ENC_NA, &symbolId);
     offset++;
 
-    proto_tree_add_uint_format(timing_header_tree, hf_oran_frame_id, tvb, offset - 3, 3, 0, "Time Offset: +%g", computeTime(frameId, subframeId, symbolId));
+    // will add timinf stuff after ensuring sample rate
 
-    char id[16];
-    snprintf(id, 16, "%d-%d-%d", frameId, subframeId, slotId);
+    // offset 0x1E
+    proto_item *sectionHeading;
+    proto_tree *section_tree = proto_tree_add_subtree(oran_tree, tvb, offset, 0, ett_oran_u_section, &sectionHeading, "Section");
+
+    /* Section Header fields (darker green part) */
+
+    /* sectionId */
+    uint32_t sectionId = 0;
+    proto_item *ti = proto_tree_add_item_ret_uint(section_tree, hf_oran_section_id, tvb, offset, 2, ENC_BIG_ENDIAN, &sectionId);
+    if (sectionId == 4095)
+    {
+        proto_item_append_text(ti, " (not default coupling C/U planes using sectionId)");
+    }
+    offset++;
+    /* rb */
+    uint32_t rb;
+    proto_tree_add_item_ret_uint(section_tree, hf_oran_rb, tvb, offset, 1, ENC_NA, &rb);
+    /* symInc */
+    proto_tree_add_item(section_tree, hf_oran_symInc, tvb, offset, 1, ENC_NA);
+    /* startPrbu */
+    uint32_t startPrbu = 0;
+    proto_tree_add_item_ret_uint(section_tree, hf_oran_startPrbu, tvb, offset, 2, ENC_BIG_ENDIAN, &startPrbu);
+    offset += 2;
+
+    /* numPrbu */
+    uint32_t numPrbu = 0;
+    proto_tree_add_item_ret_uint(section_tree, hf_oran_numPrbu, tvb, offset, 1, ENC_NA, &numPrbu);
+    offset += 1;
+
+    switch (numPrbu)
+    {
+    case 46:
+        gsm_sample_rate_mult = 1;
+        break;
+    case 92:
+        gsm_sample_rate_mult = 2;
+        break;
+
+    default:
+    }
+
+    char sps[16];
+    snprintf(sps, sizeof(sps), "%s", sampleRate());
+    proto_item *pisps = proto_tree_add_string(section_tree, hf_oran_refb, tvb, offset - 1, 1, sps);
+    proto_item_set_generated(pisps);
+
+    // filling time header VVV
+    char id[64];
+    snprintf(id, sizeof(id), "+%f %s (%d-%d-%d-%d)", computeTime(frameId, subframeId, symbolId), val_to_str_const(direction, data_direction_vals, "?"), frameId, subframeId, slotId, symbolId);
     proto_item *pi = proto_tree_add_string(timing_header_tree, hf_oran_refa, tvb, ref_a_offset, 3, id);
     proto_item_set_generated(pi);
 
     proto_item_append_text(timingHeader, "%s, %03d/%d/%02d +%f)",
                            val_to_str_const(direction, data_direction_vals, "?"), frameId, subframeId, symbolId, computeTime(frameId, subframeId, symbolId));
+    // filling time header ^^^
 
-    // TODO: dirty hack, fix!
-    offset += 4;
-
-    int samples = (tvb_captured_length(tvb) - offset) >> 2; // 16bits sample pairs
+    unsigned payload_offset = offset;
+    int samples = (tvb_captured_length(tvb) - payload_offset) >> 2; // 16bits sample pairs
 
     int samplesExpected = GSM_PL_SIZE;
     if ((symbolId == 0) || (symbolId == 7))
         samplesExpected = GSM_LONG_PL_SIZE;
-    samplesExpected *= GSM_SAMPLE_RATE_MULT;
+    samplesExpected *= gsm_sample_rate_mult;
 
     if (samplesExpected == samples)
     {
         proto_item_append_text(protocol_item, " %d IQ samples %s", samplesExpected, sampleRate());
-        return tvb_captured_length(tvb);
     }
-    if (samples > samplesExpected)
+    else if (samples > samplesExpected)
     {
         proto_item_append_text(protocol_item, " %d IQ samples, %d zero bytes %s", samplesExpected, (samples - samplesExpected) << 2, sampleRate());
-        return tvb_captured_length(tvb);
     }
-
-    /* Expert error if we are short of tvb by > 3 bytes */
-    if (tvb_reported_length_remaining(tvb, offset) > 3)
+    else
     {
         expert_add_info_format(pinfo, protocol_item, &ei_oran_frame_length,
                                " payload is too short: %d samples expected, %d found",
                                samplesExpected, samples);
+        return tvb_captured_length(tvb);
     }
 
+    for (uint32_t i = 0; i < numPrbu; i++)
+    {
+        proto_item *prbHeading = proto_tree_add_string_format(section_tree, hf_oran_samples_prb,
+                                                              tvb, offset, 0,
+                                                              "", "PRB");
+        proto_tree *rb_tree = proto_item_add_subtree(prbHeading, ett_oran_u_prb);
+        int nBytesForSamples = 12 * 2 * 2;
+        if ((i == (numPrbu - 1)) && ((symbolId != 0) && (symbolId != 7)))
+        {
+            int bytesLast = nBytesForSamples - 16 * gsm_sample_rate_mult;
+            proto_item_append_text(prbHeading, " %3u (incomplete)", startPrbu + i * (1 + rb));
+            proto_tree_add_item(rb_tree, hf_oran_iq_user_data, tvb, offset, bytesLast, ENC_NA);
+            offset += bytesLast;
+        }
+        else
+        {
+            proto_item_append_text(prbHeading, " %3u", startPrbu + i * (1 + rb));
+            proto_tree_add_item(rb_tree, hf_oran_iq_user_data, tvb, offset, nBytesForSamples, ENC_NA);
+            offset += nBytesForSamples;
+        }
+
+        /* Set end of prb subtree */
+        proto_item_set_end(prbHeading, tvb, offset);
+    }
     return tvb_captured_length(tvb);
 }
 
@@ -6108,6 +6171,13 @@ void proto_register_oran(void)
           FT_STRING, BASE_NONE,
           NULL, 0x0,
           "This is a calculated field for the RefA ID, which provides a reference in time",
+          HFILL}},
+
+        {&hf_oran_refb,
+         {"Sample Rate", "oran_fh_cus.refb",
+          FT_STRING, BASE_NONE,
+          NULL, 0x0,
+          "This is a calculated field for the Sample Rate",
           HFILL}},
 
         /* Section 7.5.2.15 */
