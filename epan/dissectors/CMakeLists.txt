@@ -1676,7 +1676,7 @@ set(DISSECTOR_SRC
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-opsi.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-optommp.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-opus.c
-	${CMAKE_CURRENT_SOURCE_DIR}/packet-oran-gsm.c
+	${CMAKE_CURRENT_SOURCE_DIR}/packet-oran.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-osc.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-oscore.c
 	${CMAKE_CURRENT_SOURCE_DIR}/packet-osi-options.c
