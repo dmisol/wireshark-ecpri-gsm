@@ -36,6 +36,8 @@
 #include <epan/to_str.h>
 #include <epan/decode_as.h>
 #include <epan/proto_data.h>
+#include <epan/tvbuff.h>
+#include <stdio.h>
 #include <wiretap/wtap.h>
 #include <wsutil/str_util.h>
 #include "packet-mtp3.h"
@@ -46,6 +48,7 @@
 
 /* function prototypes */
 void proto_register_sccp(void);
+void proto_register_a_hex(void);
 void proto_reg_handoff_sccp(void);
 
 static Standard_Type decode_mtp3_standard;
@@ -679,6 +682,9 @@ static int hf_sccp_linked_dissector;
 static int hf_sccp_end_optional_param;
 static int hf_sccp_unknown_message;
 static int hf_sccp_unknown_parameter;
+static int hf_bts_id;
+static int hf_trx_id;
+static int hf_ts_id;
 
 /* Initialize the subtree pointers */
 static int ett_sccp;
@@ -779,6 +785,8 @@ static dissector_handle_t inap_handle;
 static dissector_handle_t bsap_handle;
 static dissector_handle_t bssap_le_handle;
 static dissector_handle_t bssap_plus_handle;
+static dissector_handle_t abis_oml_handle;
+static dissector_handle_t abis_rsl_handle;
 static dissector_handle_t default_handle;
 
 static const char *default_payload;
@@ -2496,6 +2504,50 @@ dissect_sccp_data_param(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, scc
     return;
   }
 
+  switch(ssn){
+    case 0xfc:
+      switch (tvb_get_uint8(tvb, 0)) {
+        case 0x80:
+          call_dissector_with_data(abis_oml_handle, tvb, pinfo, tree, sccp_info);
+          return;
+          break;
+        default:
+      }
+    break;
+    case 0xfd:
+      guint raw_data_len = tvb_captured_length(tvb);
+      uint32_t offset = 3;
+      tvbuff_t *sub_tvb = tvb_new_subset_length(tvb, offset, raw_data_len - offset);
+      proto_tree_add_item(tree, hf_bts_id, tvb, 0, 1, ENC_NA);
+      proto_tree_add_item(tree, hf_trx_id, tvb, 1, 1, ENC_NA);
+      proto_tree_add_item(tree, hf_ts_id,  tvb, 2, 1, ENC_NA);
+      call_dissector_with_data(abis_rsl_handle, sub_tvb, pinfo, tree, sccp_info);
+      return;
+      break;
+  }
+
+  if (assoc && assoc->curr_msg && assoc->curr_msg->type == SCCP_MSG_TYPE_DT2) {
+    guint raw_data_len = tvb_captured_length(tvb);
+    dissector_handle_t cur_handler;
+    uint32_t offset;
+
+    if (tvb_get_uint8(tvb, 4) == 0x13) {
+        offset = 2;
+        cur_handler = bssap_handle;
+    } else {
+      offset = 3;
+      cur_handler = abis_rsl_handle;
+
+      proto_tree_add_item(tree, hf_bts_id, tvb, 0, 1, ENC_NA);
+      proto_tree_add_item(tree, hf_trx_id, tvb, 1, 1, ENC_NA);
+      proto_tree_add_item(tree, hf_ts_id,  tvb, 2, 1, ENC_NA);
+    }
+
+    tvbuff_t *sub_tvb = tvb_new_subset_length(tvb, offset, raw_data_len - offset);
+    call_dissector_with_data(cur_handler, sub_tvb, pinfo, tree, sccp_info);
+    return;
+  }
+
   /* try user default subdissector */
   if (default_handle) {
     call_dissector_with_data(default_handle, tvb, pinfo, tree, sccp_info);
@@ -2696,7 +2748,19 @@ dissect_sccp_parameter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *sccp_tree,
     break;
 
   case PARAMETER_DATA:
+    bool x = false;
+    if (sccp_info && sccp_info->message_type == SCCP_MSG_TYPE_DT2) {
+      if (!sccp_info->sccp_msg) {
+        x = true;
+        sccp_info->sccp_msg = calloc(1, sizeof(sccp_msg_info_t));
+        sccp_info->sccp_msg->type = sccp_info->message_type;
+      }
+      sccp_info->assoc->curr_msg = sccp_info->sccp_msg;
+    }
+
     dissect_sccp_data_param(parameter_tvb, pinfo, tree, sccp_info->assoc);
+    if (x)
+      free(sccp_info->sccp_msg);
 
     /* TODO? Re-adjust length of SCCP item since it may be sub-dissected */
     /* sccp_length = proto_item_get_len(sccp_item);
@@ -3602,6 +3666,28 @@ init_sccp(void)
   sccp_reassembly_id_next = 1;
 }
 
+static const value_string ahex_id_vals[] = {
+    { 0xFF, "All" },
+    { 0, "0" },
+    { 1, "1" },
+    { 2, "2" },
+    { 3, "3" },
+    { 4, "4" },
+    { 5, "5" },
+    { 6, "6" },
+    { 7, "7" },
+    { 8, "8" },
+    { 9, "9" },
+    { 10, "10" },
+    { 11, "11" },
+    { 12, "12" },
+    { 13, "13" },
+    { 14, "14" },
+    { 15, "15" },
+    { 0, NULL }
+};
+
+
 /* Register the protocol with Wireshark */
 void
 proto_register_sccp(void)
@@ -4119,6 +4205,18 @@ proto_register_sccp(void)
        FT_BYTES, BASE_NONE, NULL, 0x00,
        NULL, HFILL }
     },
+    { &hf_bts_id,
+      { "BTS IDX", "ahex.bts_idx",
+        FT_UINT8, BASE_HEX, VALS(ahex_id_vals), 0x0,
+        NULL, HFILL } },
+    { &hf_trx_id,
+      { "TRX IDX", "ahex.trx_idx",
+        FT_UINT8, BASE_HEX, VALS(ahex_id_vals), 0x0,
+        NULL, HFILL } },
+    { &hf_ts_id,
+      { "TS", "ahex.ts",
+        FT_UINT8, BASE_HEX, VALS(ahex_id_vals), 0x0,
+        NULL, HFILL } },
   };
 
   /* Setup protocol subtree array */
@@ -4275,6 +4373,9 @@ proto_reg_handoff_sccp(void)
     bsap_handle       = find_dissector_add_dependency("bsap", proto_sccp);
     bssap_le_handle   = find_dissector_add_dependency("bssap_le", proto_sccp);
     bssap_plus_handle = find_dissector_add_dependency("bssap_plus", proto_sccp);
+
+    abis_oml_handle       = find_dissector("gsm_abis_oml");
+    abis_rsl_handle       = find_dissector("gsm_abis_rsl");
 
     ss7pc_address_type = address_type_get_by_name("AT_SS7PC");
 

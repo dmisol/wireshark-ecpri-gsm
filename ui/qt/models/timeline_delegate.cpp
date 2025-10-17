@@ -42,7 +42,9 @@ void TimelineDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opti
     QStyledItemDelegate::initStyleOption(&option_vi, index);
 
     bool drawBar = false;
+DIAG_OFF(array-bounds=)
     struct timeline_span span_px = index.data(_dataRole).value<struct timeline_span>();
+DIAG_ON(array-bounds=)
     if (_dataRole == ATapDataModel::TIMELINE_DATA) {
         double span_s = span_px.maxRelTime - span_px.minRelTime;
         QTreeView * tree = qobject_cast<QTreeView *>(parent());
