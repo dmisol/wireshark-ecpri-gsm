@@ -2531,7 +2531,7 @@ dissect_sccp_data_param(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, scc
     dissector_handle_t cur_handler;
     uint32_t offset;
 
-    if (tvb_get_uint8(tvb, 4) == 0x13) {
+    if (tvb_get_uint8(tvb, 3) != 0x0c && tvb_get_uint8(tvb, 4) == 0x13) {
         offset = 2;
         cur_handler = bssap_handle;
     } else {
